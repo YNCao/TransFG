@@ -19,9 +19,12 @@ from apex import amp
 from apex.parallel import DistributedDataParallel as DDP
 
 from models.modeling import VisionTransformer, CONFIGS
+from config import get_config
+from models_swin import build_model
 from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
 from utils.data_utils import get_loader
 from utils.dist_util import get_world_size
+
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +88,61 @@ def setup(args):
 
     model = VisionTransformer(config, args.img_size, zero_head=True, num_classes=num_classes,                                                   smoothing_value=args.smoothing_value)
 
-    model.load_from(np.load(args.pretrained_dir))
+#     model.load_from(np.load(args.pretrained_dir))
     if args.pretrained_model is not None:
         pretrained_model = torch.load(args.pretrained_model)['model']
-        model.load_state_dict(pretrained_model)
+        pretrained_model.pop('head.weight')
+        pretrained_model.pop('head.bias')
+        model.load_state_dict(pretrained_model, strict=False)
+    model.to(args.device)
+    num_params = count_parameters(model)
+
+    logger.info("{}".format(config))
+    logger.info("Training parameters %s", args)
+    logger.info("Total Parameter: \t%2.1fM" % num_params)
+    return args, model
+
+def setup_swin(args):
+    # Prepare model
+    config = CONFIGS[args.model_type]
+    config.split = args.split
+    config.slide_step = args.slide_step
+    config_swin = get_config(args)
+
+    if args.dataset == "CUB_200_2011":
+        num_classes = 200
+    elif args.dataset == "car":
+        num_classes = 196
+    elif args.dataset == "nabirds":
+        num_classes = 555
+    elif args.dataset == "dog":
+        num_classes = 120
+    elif args.dataset == "INat2017":
+        num_classes = 5089
+
+    model = build_model(config_swin)
+
+#     model.load_from(np.load(args.pretrained_dir))
+    if args.pretrained_model is not None:
+        pretrained_model = torch.load(args.pretrained_model)['model']
+        # pop redundant parameter
+        pretrained_model.pop('head.weight')
+        pretrained_model.pop('head.bias')
+        # (swin_tiny) training 448*448 imgs on 224*224 pretrained model, which caused mismatch
+        pretrained_model.pop('layers.0.blocks.1.attn_mask')
+        pretrained_model.pop('layers.1.blocks.1.attn_mask')
+        pretrained_model.pop('layers.2.blocks.1.attn_mask')
+        pretrained_model.pop('layers.2.blocks.3.attn_mask')
+        pretrained_model.pop('layers.2.blocks.5.attn_mask')
+        # (swin_base) training 448*448 imgs on 224*224 pretrained model, which caused mismatch
+        pretrained_model.pop('layers.2.blocks.7.attn_mask')
+        pretrained_model.pop('layers.2.blocks.9.attn_mask')
+        pretrained_model.pop('layers.2.blocks.11.attn_mask')
+        pretrained_model.pop('layers.2.blocks.13.attn_mask')
+        pretrained_model.pop('layers.2.blocks.15.attn_mask')
+        pretrained_model.pop('layers.2.blocks.17.attn_mask')
+        
+        model.load_state_dict(pretrained_model, strict=False)
     model.to(args.device)
     num_params = count_parameters(model)
 
@@ -298,14 +352,43 @@ def main():
     # Required parameters
     parser.add_argument("--name", required=True,
                         help="Name of this run. Used for monitoring.")
+    #######################################################################################################
+    # for swin transformer 
+    #######################################################################################################
+    parser.add_argument('--cfg', type=str, required=True, metavar="FILE", help='path to config file', )
+    parser.add_argument(
+        "--opts",
+        help="Modify config options by adding 'KEY VALUE' pairs. ",
+        default=None,
+        nargs='+',
+    )
+    parser.add_argument('--batch-size', type=int, help="batch size for single GPU")
+    parser.add_argument('--data-path', type=str, help='path to dataset')
+    parser.add_argument('--zip', action='store_true', help='use zipped dataset instead of folder dataset')
+    parser.add_argument('--cache-mode', type=str, default='part', choices=['no', 'full', 'part'],
+                        help='no: no cache, '
+                             'full: cache all data, '
+                             'part: sharding the dataset into nonoverlapping pieces and only cache one piece')
+    parser.add_argument('--resume', help='resume from checkpoint')
+    parser.add_argument('--accumulation-steps', type=int, help="gradient accumulation steps")
+    parser.add_argument('--use-checkpoint', action='store_true',
+                        help="whether to use gradient checkpointing to save memory")
+    parser.add_argument('--amp-opt-level', type=str, default='O1', choices=['O0', 'O1', 'O2'],
+                        help='mixed precision opt level, if O0, no amp is used')
+    parser.add_argument('--output', default='output', type=str, metavar='PATH',
+                        help='root of output folder, the full path is <output>/<model_name>/<tag> (default: output)')
+    parser.add_argument('--tag', help='tag of experiment')
+    parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
+    parser.add_argument('--throughput', action='store_true', help='Test throughput only')
+###########################################################################################################################    
     parser.add_argument("--dataset", choices=["CUB_200_2011", "car", "dog", "nabirds", "INat2017"], default="CUB_200_2011",
                         help="Which dataset.")
-    parser.add_argument('--data_root', type=str, default='/opt/tiger/minist')
+    parser.add_argument('--data_root', type=str, default='/home/cyn/datasets')
     parser.add_argument("--model_type", choices=["ViT-B_16", "ViT-B_32", "ViT-L_16",
                                                  "ViT-L_32", "ViT-H_14"],
                         default="ViT-B_16",
                         help="Which variant to use.")
-    parser.add_argument("--pretrained_dir", type=str, default="/opt/tiger/minist/ViT-B_16.npz",
+    parser.add_argument("--pretrained_dir", type=str, default="/home/cyn/models/ViT-B_16.npz",
                         help="Where to search for pretrained ViT models.")
     parser.add_argument("--pretrained_model", type=str, default=None,
                         help="load pretrained model")
@@ -359,7 +442,8 @@ def main():
                         help="Slide step for overlap split")
 
     args = parser.parse_args()
-
+    # for single GPU training
+    dist.init_process_group('gloo', init_method='file:///tmp/somefile', rank=0, world_size=1)
     # if args.fp16 and args.smoothing_value != 0:
     #     raise NotImplementedError("label smoothing not supported for fp16 training now")
     args.data_root = '{}/{}'.format(args.data_root, args.dataset)
@@ -387,7 +471,8 @@ def main():
     set_seed(args)
 
     # Model & Tokenizer Setup
-    args, model = setup(args)
+#     args, model = setup(args)
+    args, model = setup_swin(args)
     # Training
     train(args, model)
 
