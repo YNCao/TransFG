@@ -135,12 +135,12 @@ def setup_swin(args):
         pretrained_model.pop('layers.2.blocks.3.attn_mask')
         pretrained_model.pop('layers.2.blocks.5.attn_mask')
         # (swin_base) training 448*448 imgs on 224*224 pretrained model, which caused mismatch
-        pretrained_model.pop('layers.2.blocks.7.attn_mask')
-        pretrained_model.pop('layers.2.blocks.9.attn_mask')
-        pretrained_model.pop('layers.2.blocks.11.attn_mask')
-        pretrained_model.pop('layers.2.blocks.13.attn_mask')
-        pretrained_model.pop('layers.2.blocks.15.attn_mask')
-        pretrained_model.pop('layers.2.blocks.17.attn_mask')
+#         pretrained_model.pop('layers.2.blocks.7.attn_mask')
+#         pretrained_model.pop('layers.2.blocks.9.attn_mask')
+#         pretrained_model.pop('layers.2.blocks.11.attn_mask')
+#         pretrained_model.pop('layers.2.blocks.13.attn_mask')
+#         pretrained_model.pop('layers.2.blocks.15.attn_mask')
+#         pretrained_model.pop('layers.2.blocks.17.attn_mask')
         
         model.load_state_dict(pretrained_model, strict=False)
     model.to(args.device)
