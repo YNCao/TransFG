@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_loader(args):
+    args.data_root = '{}/{}'.format(args.data_root, args.dataset)
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 

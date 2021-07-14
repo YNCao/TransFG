@@ -368,6 +368,7 @@ class BasicLayer(nn.Module):
         self.input_resolution = input_resolution
         self.depth = depth
         self.use_checkpoint = use_checkpoint
+        self.layer_features=[]
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -391,11 +392,16 @@ class BasicLayer(nn.Module):
         for blk in self.blocks:
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
+                self.layer_features.append(x.detach()) # save inter layer feature
             else:
                 x = blk(x)
+                self.layer_features.append(x.detach()) # save inter layer feature
+                
         if self.downsample is not None:
-            x = self.downsample(x)
-        return x
+            out = self.downsample(x)
+        else:
+            out = x
+        return out
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
@@ -457,7 +463,7 @@ class PatchEmbed(nn.Module):
         return flops
 
 
-class SwinTransformer(nn.Module):
+class MSSwinTransformer(nn.Module):
     r""" Swin Transformer
         A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
           https://arxiv.org/pdf/2103.14030
@@ -500,6 +506,8 @@ class SwinTransformer(nn.Module):
         self.patch_norm = patch_norm
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
         self.mlp_ratio = mlp_ratio
+        
+        self.layer_features = []
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
@@ -522,7 +530,8 @@ class SwinTransformer(nn.Module):
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
-            layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
+            dim_n = int(embed_dim * 2 ** i_layer)
+            layer = BasicLayer(dim=dim_n,
                                input_resolution=(patches_resolution[0] // (2 ** i_layer),
                                                  patches_resolution[1] // (2 ** i_layer)),
                                depth=depths[i_layer],
@@ -536,6 +545,7 @@ class SwinTransformer(nn.Module):
                                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
+            
 
         self.norm = norm_layer(self.num_features)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
@@ -565,20 +575,24 @@ class SwinTransformer(nn.Module):
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
-
+        
         for layer in self.layers:
             x = layer(x)
-
-        x = self.norm(x)  # B L C
-        x = self.avgpool(x.transpose(1, 2))  # B C 1
-        x = torch.flatten(x, 1)
+            self.layer_features.append(layer.layer_features)
+        
         return x
 
     def forward(self, x, labels=None):
 #         x = self.forward_features(x)
 #         x = self.head(x)
         part_tokens = self.forward_features(x)
+    
+        part_tokens = self.norm(part_tokens)  # B L C
+        part_tokens = self.avgpool(part_tokens.transpose(1, 2))  # B C 1
+        part_tokens = torch.flatten(part_tokens, 1)
+    
         part_logits = self.head(part_tokens)
+        
         
         if labels is not None:
             if self.smoothing_value == 0:
@@ -586,8 +600,12 @@ class SwinTransformer(nn.Module):
             else:
                 loss_fct = LabelSmoothing(self.smoothing_value)
             part_loss = loss_fct(part_logits.view(-1, self.num_classes), labels.view(-1))
+            
             contrast_loss = con_loss(part_tokens, labels.view(-1))
             loss = part_loss + self.con_w*contrast_loss
+            
+#             part_logits = torch.stack(part_logits).mean(0)
+            
             return loss, part_logits
         else:
             return part_logits
@@ -608,7 +626,7 @@ def con_loss(features, labels):
     pos_label_matrix = torch.stack([labels == labels[i] for i in range(B)]).float()
     neg_label_matrix = 1 - pos_label_matrix
     pos_cos_matrix = 1 - cos_matrix
-    neg_cos_matrix = cos_matrix - 0
+    neg_cos_matrix = cos_matrix - 0.4
     neg_cos_matrix[neg_cos_matrix < 0] = 0
     loss = (pos_cos_matrix * pos_label_matrix).sum() + (neg_cos_matrix * neg_label_matrix).sum()
     loss /= (B * B)

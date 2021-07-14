@@ -142,3 +142,6 @@ logs/
 
 # output
 output/
+
+# images
+visual/

@@ -361,13 +361,15 @@ class BasicLayer(nn.Module):
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
+                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False, detail_features=False):
 
         super().__init__()
+        self.detail_features = detail_features
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
         self.use_checkpoint = use_checkpoint
+        self.layer_features=[]
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -391,11 +393,19 @@ class BasicLayer(nn.Module):
         for blk in self.blocks:
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
+                if self.detail_features:
+                    self.layer_features.append(x.detach()) # save inter layer feature
             else:
                 x = blk(x)
+                if self.detail_features:
+                    self.layer_features.append(x.detach()) # save inter layer feature
+                
         if self.downsample is not None:
-            x = self.downsample(x)
-        return x
+            out = self.downsample(x)
+        else:
+            out = x
+        return [out,x]
+#         return out
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
@@ -457,7 +467,7 @@ class PatchEmbed(nn.Module):
         return flops
 
 
-class SwinTransformer(nn.Module):
+class MSSwinTransformer(nn.Module):
     r""" Swin Transformer
         A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
           https://arxiv.org/pdf/2103.14030
@@ -488,18 +498,23 @@ class SwinTransformer(nn.Module):
                  window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
-                 use_checkpoint=False, smoothing_value=0, con_w=0, **kwargs):
+                 use_checkpoint=False, smoothing_value=0, con_w=0, detail_features=False, num_feature_layers=1, **kwargs):
         super().__init__()
         
+        
         self.con_w = con_w
+        self.detail_features = detail_features
         self.smoothing_value = smoothing_value
         self.num_classes = num_classes
         self.num_layers = len(depths)
+        self.num_feature_layers = self.num_layers - num_feature_layers
         self.embed_dim = embed_dim
         self.ape = ape
         self.patch_norm = patch_norm
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
         self.mlp_ratio = mlp_ratio
+        
+        self.layer_features = []
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
@@ -521,8 +536,11 @@ class SwinTransformer(nn.Module):
 
         # build layers
         self.layers = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        self.heads = nn.ModuleList()
         for i_layer in range(self.num_layers):
-            layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
+            dim_n = int(embed_dim * 2 ** i_layer)
+            layer = BasicLayer(dim=dim_n,
                                input_resolution=(patches_resolution[0] // (2 ** i_layer),
                                                  patches_resolution[1] // (2 ** i_layer)),
                                depth=depths[i_layer],
@@ -534,12 +552,17 @@ class SwinTransformer(nn.Module):
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
                                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
-                               use_checkpoint=use_checkpoint)
+                               use_checkpoint=use_checkpoint,
+                               detail_features=self.detail_features)
+            n_layer = norm_layer(dim_n) 
+            head_layer = nn.Linear(dim_n, num_classes) if num_classes > 0 else nn.Identity()
             self.layers.append(layer)
+            self.norms.append(n_layer)
+            self.heads.append(head_layer)
 
-        self.norm = norm_layer(self.num_features)
+#         self.norm = norm_layer(self.num_features)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+#         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
         self.apply(self._init_weights)
 
@@ -565,32 +588,63 @@ class SwinTransformer(nn.Module):
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
-
+        yy = []
         for layer in self.layers:
-            x = layer(x)
-
-        x = self.norm(x)  # B L C
-        x = self.avgpool(x.transpose(1, 2))  # B C 1
-        x = torch.flatten(x, 1)
-        return x
+            [x,y] = layer(x)
+#             x = layer(x)
+            
+            yy.append(y)
+            
+            if self.detail_features:
+                self.layer_features.append(layer.layer_features)
+            
+#         x = self.norm(x)  # B L C
+#         x = self.avgpool(x.transpose(1, 2))  # B C 1
+#         x = torch.flatten(x, 1)
+        yy=yy[self.num_feature_layers:]
+        
+        return yy
+#         return x
 
     def forward(self, x, labels=None):
 #         x = self.forward_features(x)
 #         x = self.head(x)
         part_tokens = self.forward_features(x)
-        part_logits = self.head(part_tokens)
+    
+#         part_tokens = self.norms[-1](part_tokens)  # B L C
+#         part_tokens = self.avgpool(part_tokens.transpose(1, 2))  # B C 1
+#         part_tokens = torch.flatten(part_tokens, 1)
+        
+        for i in range(len(part_tokens)):
+            part_tokens[i] = self.norms[i+self.num_feature_layers](part_tokens[i])  # B L C
+            part_tokens[i] = self.avgpool(part_tokens[i].transpose(1, 2))  # B C 1
+            part_tokens[i] = torch.flatten(part_tokens[i], 1) 
+        part_logits=[self.heads[i+self.num_feature_layers](part_tokens[i]) for i in range(len(part_tokens))]
+
+#         part_logits = self.heads[-1](part_tokens)
+        
         
         if labels is not None:
             if self.smoothing_value == 0:
                 loss_fct = CrossEntropyLoss()
             else:
                 loss_fct = LabelSmoothing(self.smoothing_value)
-            part_loss = loss_fct(part_logits.view(-1, self.num_classes), labels.view(-1))
-            contrast_loss = con_loss(part_tokens, labels.view(-1))
+            part_loss=0
+            for i in range(len(part_logits)):
+                part_loss += loss_fct(part_logits[i].view(-1, self.num_classes), labels.view(-1))
+            
+            contrast_loss = con_loss(part_tokens[-1], labels.view(-1))
             loss = part_loss + self.con_w*contrast_loss
-            return loss, part_logits
+            
+#             part_logits = torch.stack(part_logits).mean(0)
+            
+#             return loss, torch.stack(part_logits).mean(0)       # mean fusion
+#             return loss, torch.stack(part_logits).prod(0)     # prod fusion
+            return loss, part_logits[-1]                      # no fusion
         else:
-            return part_logits
+#             return torch.stack(part_logits).mean(0)             # mean fusion
+#             return torch.stack(part_logits).prod(0)           # prod fusion
+            return part_logits[-1]                            # no fusion
 
     def flops(self):
         flops = 0
@@ -608,7 +662,7 @@ def con_loss(features, labels):
     pos_label_matrix = torch.stack([labels == labels[i] for i in range(B)]).float()
     neg_label_matrix = 1 - pos_label_matrix
     pos_cos_matrix = 1 - cos_matrix
-    neg_cos_matrix = cos_matrix - 0
+    neg_cos_matrix = cos_matrix - 0.4
     neg_cos_matrix[neg_cos_matrix < 0] = 0
     loss = (pos_cos_matrix * pos_label_matrix).sum() + (neg_cos_matrix * neg_label_matrix).sum()
     loss /= (B * B)

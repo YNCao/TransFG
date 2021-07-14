@@ -25,6 +25,9 @@ from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
 from utils.data_utils import get_loader
 from utils.dist_util import get_world_size
 
+from timm.utils import accuracy, AverageMeter
+from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
+from utils_swin import reduce_tensor
 
 logger = logging.getLogger(__name__)
 
@@ -119,40 +122,22 @@ def setup_swin(args):
         num_classes = 120
     elif args.dataset == "INat2017":
         num_classes = 5089
-
-    if args.model_type == "swin_vanilla":
-        model = build_model(config_swin, n_cls=num_classes, img_s=args.img_size)
-    if args.model_type == "swin_ms":
-        model = build_ms_model(config_swin, n_cls=num_classes, img_s=args.img_size, num_feature_layers=args.num_feature_layers)
-
-#     model.load_from(np.load(args.pretrained_dir))
-    if args.pretrained_model is not None:
-        pretrained_model = torch.load(args.pretrained_model)['model']
-        # pop redundant parameter
-        pretrained_model.pop('head.weight')
-        pretrained_model.pop('head.bias')
-        # (swin_tiny) training 448*448 imgs on 224*224 pretrained model, which caused mismatch
-        pretrained_model.pop('layers.0.blocks.1.attn_mask')
-        pretrained_model.pop('layers.1.blocks.1.attn_mask')
-        pretrained_model.pop('layers.2.blocks.1.attn_mask')
-        pretrained_model.pop('layers.2.blocks.3.attn_mask')
-        pretrained_model.pop('layers.2.blocks.5.attn_mask')
-        # (swin_base) training 448*448 imgs on 224*224 pretrained model, which caused mismatch
-#         pretrained_model.pop('layers.2.blocks.7.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.9.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.11.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.13.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.15.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.17.attn_mask')
+    print(args.dataset)
         
+    if args.model_type=="swin_vanilla":
+        model = build_model(config_swin, n_cls=num_classes, img_s=args.img_size)
+    elif args.model_type=="swin_ms":
+        model = build_ms_model(config_swin, n_cls=num_classes, img_s=args.img_size, num_feature_layers=args.num_feature_layers)              
+    if args.pretrained_model is not None:
+        pretrained_model = torch.load(args.pretrained_model)['model']       
         model.load_state_dict(pretrained_model, strict=False)
     model.to(args.device)
     num_params = count_parameters(model)
 
-    logger.info("{}".format(config_swin))
+#     logger.info("{}".format(config))
     logger.info("Training parameters %s", args)
     logger.info("Total Parameter: \t%2.1fM" % num_params)
-    return args, model
+    return args, model, config_swin
 
 def count_parameters(model):
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -165,7 +150,7 @@ def set_seed(args):
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-def valid(args, model, writer, test_loader, global_step):
+def eval(args, model, test_loader):
     # Validation!
     eval_losses = AverageMeter()
 
@@ -186,7 +171,6 @@ def valid(args, model, writer, test_loader, global_step):
         x, y = batch
         with torch.no_grad():
             logits = model(x)
-#             logits = torch.stack(logits).mean(0)
 
             eval_loss = loss_fct(logits, y)
             eval_loss = eval_loss.mean()
@@ -207,6 +191,8 @@ def valid(args, model, writer, test_loader, global_step):
         epoch_iterator.set_description("Validating... (loss=%2.5f)" % eval_losses.val)
 
     all_preds, all_label = all_preds[0], all_label[0]
+    print(all_preds)
+    print(all_label)
     accuracy = simple_accuracy(all_preds, all_label)
     accuracy = torch.tensor(accuracy).to(args.device)
     dist.barrier()
@@ -215,153 +201,71 @@ def valid(args, model, writer, test_loader, global_step):
 
     logger.info("\n")
     logger.info("Validation Results")
-    logger.info("Global Steps: %d" % global_step)
+#     logger.info("Global Steps: %d" % global_step)
     logger.info("Valid Loss: %2.5f" % eval_losses.avg)
     logger.info("Valid Accuracy: %2.5f" % val_accuracy)
-    if args.local_rank in [-1, 0]:
-        writer.add_scalar("test/accuracy", scalar_value=val_accuracy, global_step=global_step)
+#     if args.local_rank in [-1, 0]:
+#         writer.add_scalar("test/accuracy", scalar_value=val_accuracy)
         
     return val_accuracy
 
-def train(args, model):
-    """ Train the model """
-    if args.local_rank in [-1, 0]:
-        os.makedirs(args.output_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir=os.path.join("logs", args.name))
+@torch.no_grad()
+def validate(config, data_loader, model):
+    criterion = torch.nn.CrossEntropyLoss()
+    model.eval()
 
-    args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
+    batch_time = AverageMeter()
+    loss_meter = AverageMeter()
+    acc1_meter = AverageMeter()
+    acc5_meter = AverageMeter()
 
-    # Prepare dataset
-    train_loader, test_loader = get_loader(args)
+    end = time.time()
+    for idx, (images, target) in enumerate(data_loader):
+        images = images.cuda(non_blocking=True)
+        target = target.cuda(non_blocking=True)
 
-    # Prepare optimizer and scheduler
-    optimizer = torch.optim.SGD(model.parameters(),
-                                lr=args.learning_rate,
-                                momentum=0.9,
-                                weight_decay=args.weight_decay)
-    t_total = args.num_steps
-    if args.decay_type == "cosine":
-        scheduler = WarmupCosineSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
-    else:
-        scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
+        # compute output
+        output = model(images)
 
-    if args.fp16:
-        model, optimizer = amp.initialize(models=model,
-                                          optimizers=optimizer,
-                                          opt_level=args.fp16_opt_level)
-        amp._amp_state.loss_scalers[0]._loss_scale = 2**20
+        # measure accuracy and record loss
+        loss = criterion(output, target)
+        acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
-    # Distributed training
-    if args.local_rank != -1:
-        model = DDP(model, message_size=250000000, gradient_predivide_factor=get_world_size())
+        acc1 = reduce_tensor(acc1)
+        acc5 = reduce_tensor(acc5)
+        loss = reduce_tensor(loss)
 
-    # Train!
-    logger.info("***** Running training *****")
-    logger.info("  Total optimization steps = %d", args.num_steps)
-    logger.info("  Instantaneous batch size per GPU = %d", args.train_batch_size)
-    logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d",
-                args.train_batch_size * args.gradient_accumulation_steps * (
-                    torch.distributed.get_world_size() if args.local_rank != -1 else 1))
-    logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
+        loss_meter.update(loss.item(), target.size(0))
+        acc1_meter.update(acc1.item(), target.size(0))
+        acc5_meter.update(acc5.item(), target.size(0))
 
-    model.zero_grad()
-    set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
-    losses = AverageMeter()
-    global_step, best_acc = 0, 0
-    start_time = time.time()
-    while True:
-        model.train()
-        epoch_iterator = tqdm(train_loader,
-                              desc="Training (X / X Steps) (loss=X.X)",
-                              bar_format="{l_bar}{r_bar}",
-                              dynamic_ncols=True,
-                              disable=args.local_rank not in [-1, 0])
-        all_preds, all_label = [], []
-        for step, batch in enumerate(epoch_iterator):
-            batch = tuple(t.to(args.device) for t in batch)
-            x, y = batch
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
 
-            loss, logits = model(x, y)
-#             logits = torch.stack(logits).mean(0)
-            loss = loss.mean()
+        if idx % config.PRINT_FREQ == 0:
+            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+            logger.info(
+                f'Test: [{idx}/{len(data_loader)}]\t'
+                f'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                f'Loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
+                f'Acc@1 {acc1_meter.val:.3f} ({acc1_meter.avg:.3f})\t'
+                f'Acc@5 {acc5_meter.val:.3f} ({acc5_meter.avg:.3f})\t'
+                f'Mem {memory_used:.0f}MB')
+    logger.info(f' * Acc@1 {acc1_meter.avg:.3f} Acc@5 {acc5_meter.avg:.3f}')
+    return acc1_meter.avg, acc5_meter.avg, loss_meter.avg
 
-            preds = torch.argmax(logits, dim=-1)
 
-            if len(all_preds) == 0:
-                all_preds.append(preds.detach().cpu().numpy())
-                all_label.append(y.detach().cpu().numpy())
-            else:
-                all_preds[0] = np.append(
-                    all_preds[0], preds.detach().cpu().numpy(), axis=0
-                )
-                all_label[0] = np.append(
-                    all_label[0], y.detach().cpu().numpy(), axis=0
-                )
-
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
-            if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
-
-            if (step + 1) % args.gradient_accumulation_steps == 0:
-                losses.update(loss.item()*args.gradient_accumulation_steps)
-                if args.fp16:
-                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-                else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                scheduler.step()
-                optimizer.step()
-                optimizer.zero_grad()
-                global_step += 1
-
-                epoch_iterator.set_description(
-                    "Training (%d / %d Steps) (loss=%2.5f)" % (global_step, t_total, losses.val)
-                )
-                if args.local_rank in [-1, 0]:
-                    writer.add_scalar("train/loss", scalar_value=losses.val, global_step=global_step)
-                    writer.add_scalar("train/lr", scalar_value=scheduler.get_lr()[0], global_step=global_step)
-                if global_step % args.eval_every == 0:
-                    with torch.no_grad():
-                        accuracy = valid(args, model, writer, test_loader, global_step)
-                    if args.local_rank in [-1, 0]:
-                        if best_acc < accuracy:
-                            save_model(args, model)
-                            best_acc = accuracy
-                        logger.info("best accuracy so far: %f" % best_acc)
-                    model.train()
-
-                if global_step % t_total == 0:
-                    break
-        all_preds, all_label = all_preds[0], all_label[0]
-        accuracy = simple_accuracy(all_preds, all_label)
-        accuracy = torch.tensor(accuracy).to(args.device)
-        dist.barrier()
-        train_accuracy = reduce_mean(accuracy, args.nprocs)
-        train_accuracy = train_accuracy.detach().cpu().numpy()
-        logger.info("train accuracy so far: %f" % train_accuracy)
-        losses.reset()
-        if global_step % t_total == 0:
-            break
-
-    writer.close()
-    logger.info("Best Accuracy: \t%f" % best_acc)
-    logger.info("End Training!")
-    end_time = time.time()
-    logger.info("Total Training Time: \t%f hours" % ((end_time - start_time) / 3600))
-    
 # parser setup
 def parse_option():
     parser = argparse.ArgumentParser()
     # Required parameters
-    parser.add_argument("--name", required=True,
-                        help="Name of this run. Used for monitoring.")
+#     parser.add_argument("--name", required=True, help="Name of this run. Used for monitoring.")
+    parser.add_argument("--name", default="test", type=str, help="Name of this run. Used for monitoring.")
     #######################################################################################################
     # for swin transformer 
     #######################################################################################################
-    parser.add_argument('--cfg', type=str, required=True, metavar="FILE", help='path to config file', )
+    parser.add_argument('--cfg', default="./configs_swin/swin_tiny_patch4_window7_224.yaml", type=str, metavar="FILE", help='path to config file', )
     parser.add_argument(
         "--opts",
         help="Modify config options by adding 'KEY VALUE' pairs. ",
@@ -454,6 +358,7 @@ def parse_option():
 
 def main():
     args = parse_option()
+    print("main args.model_type{}".format(args.model_type))
     
     # for single GPU training
     dist.init_process_group('gloo', init_method='file:///tmp/somefile', rank=0, world_size=1)
@@ -487,9 +392,26 @@ def main():
 
     # Model & Tokenizer Setup
 #     args, model = setup(args)
-    args, model = setup_swin(args)
-    # Training
-    train(args, model)
+    args, model, config_swin = setup_swin(args)
+
+    
+#     if args.local_rank in [-1, 0]:
+#         os.makedirs(args.output_dir, exist_ok=True)
+#     writer = SummaryWriter(log_dir=os.path.join("logs", args.name))
+
+    args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
+
+    # Prepare dataset
+    train_loader, test_loader = get_loader(args)
+    
+    # Eval/Valid
+    with torch.no_grad():
+        acc = eval(args, model, test_loader)
+    print("acc={0}".format(acc))
+    
+    with torch.no_grad():
+        acc1, acc5, loss = validate(config_swin, test_loader, model)
+    print("acc1={0}, acc5={1}, loss={2}".format(acc1, acc5, loss))
 
 if __name__ == "__main__":
     main()
