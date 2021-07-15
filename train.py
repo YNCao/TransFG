@@ -103,12 +103,8 @@ def setup(args):
     return args, model
 
 def setup_swin(args):
-    # Prepare model
-#     config = CONFIGS[args.model_type]
-#     config.split = args.split
-#     config.slide_step = args.slide_step
-    config_swin = get_config(args)
-
+    
+    # dataset
     if args.dataset == "CUB_200_2011":
         num_classes = 200
     elif args.dataset == "car":
@@ -119,13 +115,26 @@ def setup_swin(args):
         num_classes = 120
     elif args.dataset == "INat2017":
         num_classes = 5089
-
-    if args.model_type == "swin_vanilla":
+    
+    # config
+    if "_t" in args.model_type:
+        args.cfg = "./configs_swin/swin_tiny_patch4_window7_224.yaml"
+        args.pretrained_model = "../../models/swin_tiny_patch4_window7_224.pth"
+    elif "_s" in args.model_type:
+        args.cfg = "./configs_swin/swin_small_patch4_window7_224.yaml"    
+        args.pretrained_model = "../../models/swin_small_patch4_window7_224.pth"        
+    elif "_b" in args.model_type:
+        args.cfg = "./configs_swin/swin_base_patch4_window7_224.yaml"
+        args.pretrained_model = "../../models/swin_base_patch4_window7_224_22k.pth"
+    
+    config_swin = get_config(args)
+    
+    # build model
+    if "swin_vanilla" in args.model_type:
         model = build_model(config_swin, n_cls=num_classes, img_s=args.img_size)
-    if args.model_type == "swin_ms":
+    if "swin_ms" in args.model_type:
         model = build_ms_model(config_swin, n_cls=num_classes, img_s=args.img_size, num_feature_layers=args.num_feature_layers)
 
-#     model.load_from(np.load(args.pretrained_dir))
     if args.pretrained_model is not None:
         pretrained_model = torch.load(args.pretrained_model)['model']
         # pop redundant parameter
@@ -138,12 +147,13 @@ def setup_swin(args):
         pretrained_model.pop('layers.2.blocks.3.attn_mask')
         pretrained_model.pop('layers.2.blocks.5.attn_mask')
         # (swin_base) training 448*448 imgs on 224*224 pretrained model, which caused mismatch
-#         pretrained_model.pop('layers.2.blocks.7.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.9.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.11.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.13.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.15.attn_mask')
-#         pretrained_model.pop('layers.2.blocks.17.attn_mask')
+        if not "_t" in args.model_type:
+            pretrained_model.pop('layers.2.blocks.7.attn_mask')
+            pretrained_model.pop('layers.2.blocks.9.attn_mask')
+            pretrained_model.pop('layers.2.blocks.11.attn_mask')
+            pretrained_model.pop('layers.2.blocks.13.attn_mask')
+            pretrained_model.pop('layers.2.blocks.15.attn_mask')
+            pretrained_model.pop('layers.2.blocks.17.attn_mask')
         
         model.load_state_dict(pretrained_model, strict=False)
     model.to(args.device)
@@ -361,7 +371,7 @@ def parse_option():
     #######################################################################################################
     # for swin transformer 
     #######################################################################################################
-    parser.add_argument('--cfg', type=str, required=True, metavar="FILE", help='path to config file', )
+    parser.add_argument('--cfg', type=str, metavar="FILE", help='path to config file', )
     parser.add_argument(
         "--opts",
         help="Modify config options by adding 'KEY VALUE' pairs. ",
@@ -391,7 +401,7 @@ def parse_option():
     parser.add_argument("--dataset", choices=["CUB_200_2011", "car", "dog", "nabirds", "INat2017"], default="CUB_200_2011",
                         help="Which dataset.")
     parser.add_argument('--data_root', type=str, default='/home/cyn/datasets')
-    parser.add_argument("--model_type", choices=["swin_ms","swin_vanilla","ViT-B_16", "ViT-B_32", "ViT-L_16",
+    parser.add_argument("--model_type", choices=["swin_ms_t", "swin_ms_s", "swin_ms_b","swin_vanilla_t","swin_vanilla_s","swin_vanilla_b","ViT-B_16", "ViT-B_32", "ViT-L_16",
                                                  "ViT-L_32", "ViT-H_14"],
                         default="ViT-B_16",
                         help="Which variant to use.")
@@ -460,8 +470,6 @@ def main():
     # if args.fp16 and args.smoothing_value != 0:
     #     raise NotImplementedError("label smoothing not supported for fp16 training now")
     
-    # moved to utils.data_utils.get_loader()
-    # args.data_root = '{}/{}'.format(args.data_root, args.dataset)
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

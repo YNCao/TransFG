@@ -32,7 +32,7 @@ def featuremap(f, num_batch=0, edge=10, start_ch=None):
         fout = np.vstack(fout)
     return corr, fout
 
-def v_featuremap():
+def v_featuremap(num_classes=200, layers=[2,2,6,2]):
     # setup
     os.environ["CUDA_VISIBLE_DEVICES"]="0"
     # args
@@ -46,7 +46,7 @@ def v_featuremap():
 
     # model
     model_ckpt = torch.load('output/sample_run_swin_t_0.5_checkpoint.bin')
-    model=MSSwinTransformer(img_size=448, num_classes=200)
+    model=MSSwinTransformer(img_size=448, num_classes=200, detail_features=True, num_feature_layers=len(layers))
     model.load_state_dict(model_ckpt['model'])
     model.eval()
     # x=torch.randn((16,3,448,448))
@@ -54,7 +54,7 @@ def v_featuremap():
     f=model.forward_features(x)
     # f.shape
 
-    layers = [2, 2, 6, 2]
+    layers = layers
     lf = model.layer_features
     for i in range(len(layers)):
         for j in range(layers[i]):
