@@ -125,7 +125,6 @@ def setup_swin(args):
         args.cfg = "./configs_swin/swin_tiny_patch4_window7_224.yaml"
     if "_s" in args.model_type:
         args.cfg = "./configs_swin/swin_small_patch4_window7_224.yaml"    
-    config_swin = get_config(args)
     if "_b" in args.model_type:
         args.cfg = "./configs_swin/swin_base_patch4_window7_224.yaml"
     
@@ -305,7 +304,7 @@ def parse_option():
                         help="Which dataset.")
     parser.add_argument('--data_root', type=str, default='/home/cyn/datasets')
     parser.add_argument("--model_type", choices=["swin_ms_t", "swin_ms_s", "swin_ms_b", "swin_vanilla_t", "swin_vanilla_s", "swin_vanilla_b", "ViT-B_16", "ViT-B_32", "ViT-L_16", "ViT-L_32", "ViT-H_14"], 
-                        default="ViT-B_16",
+                        default="swin_ms_t",
                         help="Which variant to use.")
     parser.add_argument("--pretrained_dir", type=str, default="/home/cyn/models/ViT-B_16.npz",
                         help="Where to search for pretrained ViT models.")
