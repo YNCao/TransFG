@@ -1,11 +1,32 @@
 import os
+import argparse
+import cv2
 import numpy as np
 import torch
+import timm
 import matplotlib.pyplot as plt
 
 import test
 from utils.data_utils import get_loader
 from models_swin.ms_swin_transformer import *
+
+
+# for CAM
+from pytorch_grad_cam import GradCAM, \
+                             ScoreCAM, \
+                             GradCAMPlusPlus, \
+                             AblationCAM, \
+                             XGradCAM, \
+                             EigenCAM, \
+                             EigenGradCAM
+
+from pytorch_grad_cam import GuidedBackpropReLUModel
+from pytorch_grad_cam.utils.image import show_cam_on_image, \
+                                         deprocess_image, \
+                                         preprocess_image
+
+
+
 
 # visualize feature map + channel correlation
 def featuremap(f, num_batch=0, edge=10, start_ch=None):
@@ -76,6 +97,41 @@ def v_featuremap(num_classes=200, layers=[2,2,6,2]):
             plt.show()
             
             
+#####################################################################################################################
+# CAM
+def get_cam_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--use-cuda', action='store_true', default=False,
+                        help='Use NVIDIA GPU acceleration')
+    parser.add_argument('--image-path', type=str, default='./examples/both.png',
+                        help='Input image path')
+    parser.add_argument('--aug_smooth', action='store_true',
+                        help='Apply test time augmentation to smooth the CAM')
+    parser.add_argument('--eigen_smooth', action='store_true',
+                        help='Reduce noise by taking the first principle componenet'
+                        'of cam_weights*activations')
+
+    parser.add_argument('--method', type=str, default='gradcam',
+                        help='Can be gradcam/gradcam++/scorecam/xgradcam/ablationcam')
+
+    args = parser.parse_args()
+    args.use_cuda = args.use_cuda and torch.cuda.is_available()
+    if args.use_cuda:
+        print('Using GPU for acceleration')
+    else:
+        print('Using CPU for computation')
+
+    return args
+
+def reshape_transform(tensor, height=7, width=7):
+    result = tensor.reshape(tensor.size(0), 
+        height, width, tensor.size(2))
+
+    # Bring the channels to the first dimension,
+    # like in CNNs.
+    result = result.transpose(2, 3).transpose(1, 2)
+    return result
+
 
 if __name__ == "__main__":
     v_featuremap()

@@ -562,6 +562,7 @@ class MSSwinTransformer(nn.Module):
 
 #         self.norm = norm_layer(self.num_features)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.maxpool = nn.AdaptiveMaxPool1d(1)
 #         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
         self.apply(self._init_weights)
@@ -619,6 +620,11 @@ class MSSwinTransformer(nn.Module):
             part_tokens[i] = self.norms[i+self.num_feature_layers](part_tokens[i])  # B L C
             part_tokens[i] = self.avgpool(part_tokens[i].transpose(1, 2))  # B C 1
             part_tokens[i] = torch.flatten(part_tokens[i], 1) 
+#         for i in [-1]:
+#             part_tokens[i] = self.norms[i](part_tokens[i])  # B L C
+#             part_tokens[i] = self.avgpool(part_tokens[i].transpose(1, 2))  # B C 1
+#             part_tokens[i] = torch.flatten(part_tokens[i], 1) 
+        
         part_logits=[self.heads[i+self.num_feature_layers](part_tokens[i]) for i in range(len(part_tokens))]
 
 #         part_logits = self.heads[-1](part_tokens)
@@ -632,6 +638,9 @@ class MSSwinTransformer(nn.Module):
             part_loss=0
             for i in range(len(part_logits)):
                 part_loss += loss_fct(part_logits[i].view(-1, self.num_classes), labels.view(-1))
+                
+#             part_logits = torch.stack(part_logits).mean(0)
+#             part_loss = loss_fct(part_logits.view(-1, self.num_classes), labels.view(-1))
             
             contrast_loss = con_loss(part_tokens[-1], labels.view(-1))
             loss = part_loss + self.con_w*contrast_loss
@@ -641,10 +650,14 @@ class MSSwinTransformer(nn.Module):
 #             return loss, torch.stack(part_logits).mean(0)       # mean fusion
 #             return loss, torch.stack(part_logits).prod(0)     # prod fusion
             return loss, part_logits[-1]                      # no fusion
+#             return loss, part_logits
         else:
+#             part_logits = torch.stack(part_logits).mean(0)
+
 #             return torch.stack(part_logits).mean(0)             # mean fusion
 #             return torch.stack(part_logits).prod(0)           # prod fusion
             return part_logits[-1]                            # no fusion
+#             return part_logits
 
     def flops(self):
         flops = 0

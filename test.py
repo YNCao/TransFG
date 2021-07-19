@@ -305,7 +305,7 @@ def parse_option():
                         help="Which dataset.")
     parser.add_argument('--data_root', type=str, default='/home/cyn/datasets')
     parser.add_argument("--model_type", choices=["swin_ms_t", "swin_ms_s", "swin_ms_b", "swin_vanilla_t", "swin_vanilla_s", "swin_vanilla_b", "ViT-B_16", "ViT-B_32", "ViT-L_16", "ViT-L_32", "ViT-H_14"], 
-                        default="ViT-B_16",
+                        default="swin_ms_t",
                         help="Which variant to use.")
     parser.add_argument("--pretrained_dir", type=str, default="/home/cyn/models/ViT-B_16.npz",
                         help="Where to search for pretrained ViT models.")
@@ -360,7 +360,7 @@ def parse_option():
     parser.add_argument('--slide_step', type=int, default=12,
                         help="Slide step for overlap split")
 
-    args = parser.parse_args()
+    args = parser.parse_args(args=[])
     
     return args
 
