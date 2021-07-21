@@ -359,7 +359,7 @@ def parse_option():
     parser.add_argument('--slide_step', type=int, default=12,
                         help="Slide step for overlap split")
 
-    args = parser.parse_args()
+    args = parser.parse_args(args=[])
     
     return args
 

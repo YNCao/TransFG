@@ -42,7 +42,7 @@ def get_args():
                         help='Can be gradcam/gradcam++/scorecam/xgradcam/ablationcam')
     
     parser.add_argument('--stage', type=int, default=-1, help='choosing **cam stage')
-    parser.add_argument('--block', type=int, default=-1, help='choosing **cam stage')
+    parser.add_argument('--block', type=int, default=-2, help='choosing **cam stage')
 
     args = parser.parse_args()
     args.use_cuda = args.use_cuda and torch.cuda.is_available()
