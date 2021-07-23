@@ -13,6 +13,44 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
 from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNorm
 
+class LabelSmoothing(nn.Module):
+    """
+    NLL loss with label smoothing.
+    """
+    def __init__(self, smoothing=0.0):
+        """
+        Constructor for the LabelSmoothing module.
+        :param smoothing: label smoothing factor
+        """
+        super(LabelSmoothing, self).__init__()
+        self.confidence = 1.0 - smoothing
+        self.smoothing = smoothing
+
+    def forward(self, x, target):
+        logprobs = torch.nn.functional.log_softmax(x, dim=-1)
+
+        nll_loss = -logprobs.gather(dim=-1, index=target.unsqueeze(1))
+        nll_loss = nll_loss.squeeze(1)
+        smooth_loss = -logprobs.mean(dim=-1)
+        loss = self.confidence * nll_loss + self.smoothing * smooth_loss
+        return loss.mean()
+
+    
+class Part_Attention(nn.Module):
+    def __init__(self):
+        super(Part_Attention, self).__init__()
+
+    def forward(self, x):
+        length = len(x)
+        last_map = x[0]
+        for i in range(1, length):
+            last_map = torch.matmul(x[i], last_map)
+        last_map = last_map[:,:,0,1:]
+
+        _, max_inx = last_map.max(2)
+        return _, max_inx
+
+    
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()

@@ -19,11 +19,20 @@ from apex import amp
 from apex.parallel import DistributedDataParallel as DDP
 
 from models.modeling import VisionTransformer, CONFIGS
-from config import get_config
-from models_swin.build import build_model, build_ms_model
+
+
 from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
 from utils.data_utils import get_loader
 from utils.dist_util import get_world_size
+#####################swin_transformer#####################################
+from config import get_config
+
+from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
+from timm.utils import accuracy, AverageMeter
+
+from models_swin.build import build_model, build_ms_model
+from lr_scheduler import build_scheduler
+from optimizer import build_optimizer
 
 
 logger = logging.getLogger(__name__)
@@ -249,11 +258,18 @@ def train(args, model):
                                 lr=args.learning_rate,
                                 momentum=0.9,
                                 weight_decay=args.weight_decay)
+
+#     config_swin = get_config(args)
+#     optimizer = build_optimizer(config_swin, model)
+    
     t_total = args.num_steps
     if args.decay_type == "cosine":
         scheduler = WarmupCosineSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
     else:
         scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
+        
+
+#     scheduler = build_scheduler(config_swin, optimizer, len(train_loader))
 
     if args.fp16:
         model, optimizer = amp.initialize(models=model,
