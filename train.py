@@ -128,13 +128,16 @@ def setup_swin(args):
     # config
     if "_t" in args.model_type:
         args.cfg = "./configs_swin/swin_tiny_patch4_window7_224.yaml"
-        args.pretrained_model = "../../models/swin_tiny_patch4_window7_224.pth"
+        if args.pretrained_model is None:
+            args.pretrained_model = "../../models/swin_tiny_patch4_window7_224.pth"
     elif "_s" in args.model_type:
-        args.cfg = "./configs_swin/swin_small_patch4_window7_224.yaml"    
-        args.pretrained_model = "../../models/swin_small_patch4_window7_224.pth"        
+        args.cfg = "./configs_swin/swin_small_patch4_window7_224.yaml"
+        if args.pretrained_model is None:
+            args.pretrained_model = "../../models/swin_small_patch4_window7_224.pth"        
     elif "_b" in args.model_type:
         args.cfg = "./configs_swin/swin_base_patch4_window7_224.yaml"
-        args.pretrained_model = "../../models/swin_base_patch4_window7_224_22k.pth"
+        if args.pretrained_model is None:
+            args.pretrained_model = "../../models/swin_base_patch4_window7_224_22k.pth"
     
     config_swin = get_config(args)
     
@@ -149,6 +152,7 @@ def setup_swin(args):
         # pop redundant parameter
         pretrained_model.pop('head.weight')
         pretrained_model.pop('head.bias')
+
         # (swin_tiny) training 448*448 imgs on 224*224 pretrained model, which caused mismatch
         pretrained_model.pop('layers.0.blocks.1.attn_mask')
         pretrained_model.pop('layers.1.blocks.1.attn_mask')
