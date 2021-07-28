@@ -36,6 +36,21 @@ class LabelSmoothing(nn.Module):
         return loss.mean()
 
     
+class Rollout(nn.Module):
+    def __init__(self):
+        super(Rollout, self).__init__()
+
+    def forward(self, x):
+        length = len(x)
+        last_map = x[0]
+        for i in range(1, length):
+            last_map = torch.matmul(x[i], last_map)
+        last_map = last_map[:,:,0,1:]
+
+        _, max_inx = last_map.max(2)
+        return _, max_inx
+    
+    
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -160,13 +175,15 @@ class WindowAttention(nn.Module):
             attn = self.softmax(attn)
         else:
             attn = self.softmax(attn)
-
+        # save attention weight
+        weight = attn.detach()
+        
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x
+        return x, weight
 
     def extra_repr(self) -> str:
         return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}'
@@ -275,7 +292,7 @@ class SwinTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+        attn_windows, weight = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -292,7 +309,7 @@ class SwinTransformerBlock(nn.Module):
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        return x
+        return x, weight
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
@@ -411,14 +428,17 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
+        attn_weights = []
         for blk in self.blocks:
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x)
+                x, weight = checkpoint.checkpoint(blk, x)
+                attn_weights.append(weight)
             else:
-                x = blk(x)
+                x, weight = blk(x)
+                attn_weights.append(weight)
         if self.downsample is not None:
             x = self.downsample(x)
-        return x
+        return x, attn_weights
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
@@ -559,7 +579,8 @@ class SwinTransformer(nn.Module):
                                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
-
+        
+        self.rollout = Rollout()
         self.norm = norm_layer(self.num_features)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
@@ -588,19 +609,23 @@ class SwinTransformer(nn.Module):
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
-
+        
+        attn_weights=[]
         for layer in self.layers:
-            x = layer(x)
+            x, weight = layer(x)
+            attn_weights += weight
+            
+#         part_num, part_inx = self.rollout(attn_weights)
 
         x = self.norm(x)  # B L C
         x = self.avgpool(x.transpose(1, 2))  # B C 1
         x = torch.flatten(x, 1)
-        return x
+        return x, attn_weights
 
     def forward(self, x, labels=None):
 #         x = self.forward_features(x)
 #         x = self.head(x)
-        part_tokens = self.forward_features(x)
+        part_tokens, w = self.forward_features(x)
         part_logits = self.head(part_tokens)
         
         if labels is not None:

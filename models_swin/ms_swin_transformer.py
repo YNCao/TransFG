@@ -40,7 +40,7 @@ class Part_Attention(nn.Module):
     def __init__(self):
         super(Part_Attention, self).__init__()
 
-    def forward(self, x):
+    def forward(self, x): 
         length = len(x)
         last_map = x[0]
         for i in range(1, length):
