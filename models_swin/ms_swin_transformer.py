@@ -512,6 +512,60 @@ class PatchEmbed(nn.Module):
             flops += Ho * Wo * self.embed_dim
         return flops
 
+class AFF(nn.Module):
+    '''
+    多特征融合 AFF
+    '''
+
+    def __init__(self, channels=64, r=4):
+        super(AFF, self).__init__()
+        inter_channels = int(channels // r)
+
+        self.local_att = nn.Sequential(
+            nn.Linear(channels, inter_channels),
+            nn.Linear(inter_channels, channels),
+        )
+
+        self.global_att = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Linear(channels, inter_channels),
+            nn.Linear(inter_channels, channels),
+        )
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, residual):
+        xa = x + residual
+        xl = self.local_att(xa)
+        xg = self.global_att(xa)
+        xlg = xl + xg
+        wei = self.sigmoid(xlg)
+
+        xo = 2 * x * wei + 2 * residual * (1 - wei)
+        return xo
+    
+class Spatial_att(nn.Module):
+    def __init__(self, dim=96, r=4):
+        super().__init__()
+        
+        inter_dim = int(dim // r)
+        
+        self.att = nn.Sequential(
+            nn.Linear(dim, inter_dim),
+            nn.Linear(inter_dim, dim),
+        )
+        
+        self.conv_att = nn.Sequential(
+            nn.Conv2d(dim, inter_dim, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(inter_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inter_dim, dim, kernel_size=3, stride=2, padding=0),
+            nn.BatchNorm2d(dim),
+        )
+        
+    def forward(self, x):
+        return self.conv_att(x)
+        
 
 class MSSwinTransformer(nn.Module):
     r""" Swin Transformer
@@ -584,6 +638,7 @@ class MSSwinTransformer(nn.Module):
         self.layers = nn.ModuleList()
         self.norms = nn.ModuleList()
         self.heads = nn.ModuleList()
+        self.spatial = nn.ModuleList()
         for i_layer in range(self.num_layers):
             dim_n = int(embed_dim * 2 ** i_layer)
             layer = BasicLayer(dim=dim_n,
@@ -605,11 +660,16 @@ class MSSwinTransformer(nn.Module):
             self.layers.append(layer)
             self.norms.append(n_layer)
             self.heads.append(head_layer)
+            self.spatial.append(Spatial_att(dim=dim_n, r=1))
 
 #         self.norm = norm_layer(self.num_features)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.avgpool2d = nn.AdaptiveAvgPool2d(1)
         self.maxpool = nn.AdaptiveMaxPool1d(1)
+        self.maxpool2d = nn.AdaptiveMaxPool2d(1)
 #         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        
+        
 
         self.apply(self._init_weights)
 
@@ -661,11 +721,22 @@ class MSSwinTransformer(nn.Module):
 #         part_tokens = self.norms[-1](part_tokens)  # B L C
 #         part_tokens = self.avgpool(part_tokens.transpose(1, 2))  # B C 1
 #         part_tokens = torch.flatten(part_tokens, 1)
-        
+
+# without any attention on inter features
+#         for i in range(len(part_tokens)):
+#             part_tokens[i] = self.norms[i+self.num_feature_layers](part_tokens[i])  # B L C
+#             part_tokens[i] = self.avgpool(part_tokens[i].transpose(1, 2))  # B C 1
+#             part_tokens[i] = torch.flatten(part_tokens[i], 1) 
+
+# spatial attention for inter features
         for i in range(len(part_tokens)):
+            B, L, C = part_tokens[i].shape
+            N = int(L**0.5)
             part_tokens[i] = self.norms[i+self.num_feature_layers](part_tokens[i])  # B L C
-            part_tokens[i] = self.avgpool(part_tokens[i].transpose(1, 2))  # B C 1
+            part_tokens[i] = self.spatial[i+self.num_feature_layers](part_tokens[i].transpose(1,2).view(B, C, N, N)) # B C L
+            part_tokens[i] = self.avgpool2d(part_tokens[i]).view(B,C,1)  # B C 1
             part_tokens[i] = torch.flatten(part_tokens[i], 1) 
+
 #         for i in [-1]:
 #             part_tokens[i] = self.norms[i](part_tokens[i])  # B L C
 #             part_tokens[i] = self.avgpool(part_tokens[i].transpose(1, 2))  # B C 1
@@ -681,11 +752,13 @@ class MSSwinTransformer(nn.Module):
                 loss_fct = CrossEntropyLoss()
             else:
                 loss_fct = LabelSmoothing(self.smoothing_value)
+            
             part_loss=0
             for i in range(len(part_logits)):
                 part_loss += loss_fct(part_logits[i].view(-1, self.num_classes), labels.view(-1))
                 
 #             part_logits = torch.stack(part_logits).mean(0)
+#             part_logits = (torch.stack(part_logits).prod(0))**(1/len(part_logits))
 #             part_loss = loss_fct(part_logits.view(-1, self.num_classes), labels.view(-1))
             
             contrast_loss = con_loss(part_tokens[-1], labels.view(-1))
