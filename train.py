@@ -97,7 +97,7 @@ def setup(args):
 
     model = VisionTransformer(config, args.img_size, zero_head=True, num_classes=num_classes,                                                   smoothing_value=args.smoothing_value)
 
-#     model.load_from(np.load(args.pretrained_dir))
+    model.load_from(np.load(args.pretrained_dir))
     if args.pretrained_model is not None:
         pretrained_model = torch.load(args.pretrained_model)['model']
         pretrained_model.pop('head.weight')
@@ -422,7 +422,7 @@ def parse_option():
                         help="Which dataset.")
     parser.add_argument('--data_root', type=str, default='/home/cyn/datasets')
     parser.add_argument("--model_type", choices=["swin_ms_t", "swin_ms_s", "swin_ms_b","swin_vanilla_t","swin_vanilla_s","swin_vanilla_b","ViT-B_16", "ViT-B_32", "ViT-L_16",
-                                                 "ViT-L_32", "ViT-H_14"],
+                                                 "ViT-L_32", "ViT-H_14", "ViT-T_16"],
                         default="ViT-B_16",
                         help="Which variant to use.")
     parser.add_argument("--pretrained_dir", type=str, default="/home/cyn/models/ViT-B_16.npz",
@@ -514,8 +514,11 @@ def main():
     set_seed(args)
 
     # Model & Tokenizer Setup
-#     args, model = setup(args)
-    args, model = setup_swin(args)
+    if 'ViT' in args.model_type:
+        args, model = setup(args)
+    elif 'swin' in args.model_type:
+        args, model = setup_swin(args)
+    
     # Training
     train(args, model)
 

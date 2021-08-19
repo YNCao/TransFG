@@ -382,4 +382,5 @@ CONFIGS = {
     'ViT-L_32': configs.get_l32_config(),
     'ViT-H_14': configs.get_h14_config(),
     'testing': configs.get_testing(),
+    'ViT-T_16':configs.get_t16_config(),
 }
