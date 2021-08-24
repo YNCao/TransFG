@@ -20,6 +20,8 @@ from scipy import ndimage
 
 import models.configs as configs
 
+import pdb
+
 logger = logging.getLogger(__name__)
 
 ATTENTION_Q = "MultiHeadDotProductAttention_1/query"
@@ -154,7 +156,7 @@ class Embeddings(nn.Module):
                                         out_channels=config.hidden_size,
                                         kernel_size=patch_size,
                                         stride=(config.slide_step, config.slide_step))
-        self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches+1, config.hidden_size))
+        self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches+part_group, config.hidden_size))
         self.cls_token = nn.Parameter(torch.zeros(1, part_group, config.hidden_size))
 
         self.dropout = Dropout(config.transformer["dropout_rate"])
@@ -234,21 +236,21 @@ class Block(nn.Module):
             self.ffn_norm.bias.copy_(np2th(weights[pjoin(ROOT, MLP_NORM, "bias")]))
 
 class Part_Attention(nn.Module):
-    def __init__(self):
+    def __init__(self, part_group=4):
         super(Part_Attention, self).__init__()
-
+        self.part_group = part_group
     def forward(self, x):
         length = len(x)
         last_map = x[0]
         for i in range(1, length):
             last_map = torch.matmul(x[i], last_map)
-        last_map = last_map[:,:,0,1:]
+        last_map = last_map[:,:,0:self.part_group,self.part_group:]
 
-        _, max_inx = last_map.max(2)
+        _, max_inx = last_map.max(-1)
         return _, max_inx
 
 class Encoder(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, part_group=4):
         super(Encoder, self).__init__()
         self.layer = nn.ModuleList()
         for _ in range(config.transformer["num_layers"] - 1):
@@ -257,20 +259,35 @@ class Encoder(nn.Module):
         self.part_select = Part_Attention()
         self.part_layer = Block(config)
         self.part_norm = LayerNorm(config.hidden_size, eps=1e-6)
+        self.part_group=part_group
 
     def forward(self, hidden_states):
+        B, L, C = hidden_states.shape
         attn_weights = []
         for layer in self.layer:
             hidden_states, weights = layer(hidden_states)
             attn_weights.append(weights)            
         part_num, part_inx = self.part_select(attn_weights)
-        part_inx = part_inx + 1
+#         pdb.set_trace()
+        part_inx = part_inx + self.part_group
         parts = []
-        B, num = part_inx.shape
-        for i in range(B):
-            parts.append(hidden_states[i, part_inx[i,:]])
-        parts = torch.stack(parts).squeeze(1)
-        concat = torch.cat((hidden_states[:,0].unsqueeze(1), parts), dim=1)
+        B, num, n_cls = part_inx.shape
+#         print("###########################################")
+        for j in range(n_cls):
+            for i in range(B):
+                parts.append(hidden_states[i, part_inx[i,:,j]])
+        
+#         print(torch.stack(parts).shape)
+        parts = torch.stack(parts).view(B,-1,C).squeeze(1)
+        
+#         print(parts.shape)
+#         print(hidden_states.shape)
+#         print(hidden_states[:,0:self.part_group].unsqueeze(1).shape)
+        if self.part_group == 1:
+            concat = torch.cat((hidden_states[:,0:self.part_group].unsqueeze(1), parts), dim=1)
+        else:
+            concat = torch.cat((hidden_states[:,0:self.part_group], parts), dim=1)
+            
         part_states, part_weights = self.part_layer(concat)
         part_encoded = self.part_norm(part_states)   
 
@@ -288,30 +305,37 @@ class Transformer(nn.Module):
         return part_encoded
 
 class VisionTransformer(nn.Module):
-    def __init__(self, config, img_size=224, num_classes=21843, smoothing_value=0, zero_head=False):
+    def __init__(self, config, img_size=224, num_classes=21843, smoothing_value=0, zero_head=False, part_group=4):
         super(VisionTransformer, self).__init__()
         self.num_classes = num_classes
         self.smoothing_value = smoothing_value
         self.zero_head = zero_head
         self.classifier = config.classifier
         self.transformer = Transformer(config, img_size)
-        self.part_head = Linear(config.hidden_size, num_classes)
+        self.part_head = nn.ModuleList()
+        self.part_group = part_group
+        for i in range(part_group):
+            self.part_head.append(Linear(config.hidden_size, num_classes))
 
     def forward(self, x, labels=None):
         part_tokens = self.transformer(x)
-        part_logits = self.part_head(part_tokens[:, 0])
+#         part_logits = self.part_head(part_tokens[:, 0])
+        part_logits = [self.part_head[i](part_tokens[:, i]) for i in range(len(self.part_head))]
 
         if labels is not None:
             if self.smoothing_value == 0:
                 loss_fct = CrossEntropyLoss()
             else:
                 loss_fct = LabelSmoothing(self.smoothing_value)
-            part_loss = loss_fct(part_logits.view(-1, self.num_classes), labels.view(-1))
+            part_loss = [loss_fct(part_logits[i].view(-1, self.num_classes), labels.view(-1)) for i in range(len(part_logits))]
+            part_loss = torch.stack(part_loss).sum()
+            
             contrast_loss = con_loss(part_tokens[:, 0], labels.view(-1))
             loss = part_loss + contrast_loss
-            return loss, part_logits
+            
+            return loss, torch.stack(part_logits).sum(0)
         else:
-            return part_logits
+            return torch.stack(part_logits).sum(0)
 
     def load_from(self, weights):
         with torch.no_grad():
@@ -330,8 +354,10 @@ class VisionTransformer(nn.Module):
                 ntok_new = posemb_new.size(1)
 
                 if self.classifier == "token":
-                    posemb_tok, posemb_grid = posemb[:, :1], posemb[0, 1:]
-                    ntok_new -= 1
+#                     posemb_tok, posemb_grid = posemb[:, :1], posemb[0, 1:]
+                    posemb_tok, posemb_grid = posemb[:, :self.part_group], posemb[0, 1:]
+#                     ntok_new -= 1
+                    ntok_new -= self.part_group
                 else:
                     posemb_tok, posemb_grid = posemb[:, :0], posemb[0]
 
