@@ -138,7 +138,7 @@ class Mlp(nn.Module):
 class Embeddings(nn.Module):
     """Construct the embeddings from patch, position embeddings.
     """
-    def __init__(self, config, img_size, in_channels=3, part_group=4):
+    def __init__(self, config, img_size, in_channels=3, part_group=2):
         super(Embeddings, self).__init__()
         self.hybrid = None
         img_size = _pair(img_size)
@@ -236,7 +236,7 @@ class Block(nn.Module):
             self.ffn_norm.bias.copy_(np2th(weights[pjoin(ROOT, MLP_NORM, "bias")]))
 
 class Part_Attention(nn.Module):
-    def __init__(self, part_group=4):
+    def __init__(self, part_group=2):
         super(Part_Attention, self).__init__()
         self.part_group = part_group
     def forward(self, x):
@@ -250,7 +250,7 @@ class Part_Attention(nn.Module):
         return _, max_inx
 
 class Encoder(nn.Module):
-    def __init__(self, config, part_group=4):
+    def __init__(self, config, part_group=2):
         super(Encoder, self).__init__()
         self.layer = nn.ModuleList()
         for _ in range(config.transformer["num_layers"] - 1):
@@ -305,37 +305,53 @@ class Transformer(nn.Module):
         return part_encoded
 
 class VisionTransformer(nn.Module):
-    def __init__(self, config, img_size=224, num_classes=21843, smoothing_value=0, zero_head=False, part_group=4):
+    def __init__(self, config, img_size=224, num_classes=21843, smoothing_value=0, zero_head=False, part_group=2, contrastive=0, cls_init_method=1):
         super(VisionTransformer, self).__init__()
         self.num_classes = num_classes
         self.smoothing_value = smoothing_value
         self.zero_head = zero_head
+        self.part_group = part_group
+        self.contrastive = contrastive
+        self.cls_init_method=cls_init_method
         self.classifier = config.classifier
         self.transformer = Transformer(config, img_size)
+        self.concat_head = Linear(config.hidden_size*part_group, num_classes)
+        self.head = Linear(config.hidden_size, num_classes)
         self.part_head = nn.ModuleList()
-        self.part_group = part_group
         for i in range(part_group):
             self.part_head.append(Linear(config.hidden_size, num_classes))
 
     def forward(self, x, labels=None):
         part_tokens = self.transformer(x)
+        B = part_tokens.shape[0]
+        cls_token_list = [part_tokens[:,i] for i in range(self.part_group)]
+        part_logits = [self.part_head[i](cls_token_list[i]) for i in range(self.part_group)]
+        part_tokens_norm = [torch.norm(cls_token_list[i]) for i in range(self.part_group)]
 #         part_logits = self.part_head(part_tokens[:, 0])
-        part_logits = [self.part_head[i](part_tokens[:, i]) for i in range(len(self.part_head))]
-
+        
+        # Feature Fusion
+        # concat
+        logits = [self.concat_head(part_tokens[:,0:self.part_group].view(B,-1))]
+        # add
+#         logits = [self.head(part_tokens[:,0:self.part_group].sum(1))]
+        
         if labels is not None:
             if self.smoothing_value == 0:
                 loss_fct = CrossEntropyLoss()
             else:
                 loss_fct = LabelSmoothing(self.smoothing_value)
-            part_loss = [loss_fct(part_logits[i].view(-1, self.num_classes), labels.view(-1)) for i in range(len(part_logits))]
-            part_loss = torch.stack(part_loss).sum()
+            part_loss = [loss_fct(logits[i].view(-1, self.num_classes), labels.view(-1)) for i in range(len(logits))]
+            part_loss = torch.stack(part_loss).mean()
+            # log file
             
+            diverse_loss = div_loss(cls_token_list)
             contrast_loss = con_loss(part_tokens[:, 0], labels.view(-1))
-            loss = part_loss + contrast_loss
             
-            return loss, torch.stack(part_logits).sum(0)
+            loss = part_loss + 0.2*diverse_loss + self.contrastive*contrast_loss 
+            
+            return loss, torch.stack(logits).sum(0)
         else:
-            return torch.stack(part_logits).sum(0)
+            return torch.stack(logits).sum(0), part_logits, div_loss([part_tokens[:,i] for i in range(self.part_group)]), part_tokens_norm
 
     def load_from(self, weights):
         with torch.no_grad():
@@ -355,7 +371,15 @@ class VisionTransformer(nn.Module):
 
                 if self.classifier == "token":
 #                     posemb_tok, posemb_grid = posemb[:, :1], posemb[0, 1:]
-                    posemb_tok, posemb_grid = posemb[:, :self.part_group], posemb[0, 1:]
+                
+                    # How to initialize cls_token  
+                    if self.cls_init_method==1:
+                        # choice 1: from 1st to 4th
+                        posemb_tok, posemb_grid = posemb[:, :self.part_group], posemb[0, 1:]              
+                    elif self.cls_init_method==2:
+                        # choice 2: repeating 1st one 4 times
+                        posemb_tok, posemb_grid = posemb[:, :1].expand(-1,4,-1), posemb[0, 1:]
+                    
 #                     ntok_new -= 1
                     ntok_new -= self.part_group
                 else:
@@ -400,6 +424,16 @@ def con_loss(features, labels):
     loss = (pos_cos_matrix * pos_label_matrix).sum() + (neg_cos_matrix * neg_label_matrix).sum()
     loss /= (B * B)
     return loss
+
+def div_loss(feature_list):
+    
+    N = len(feature_list)
+    B = feature_list[0].shape[0]
+    loss_fct = F.cosine_similarity
+    
+    loss_list = [loss_fct(feature_list[i],feature_list[j]).abs() for i in range(N) for j in range(N) if not i==j]
+    if len(loss_list)==N*(N-1):
+        return torch.stack(loss_list).sum()/N/(N-1)/B
 
 CONFIGS = {
     'ViT-B_16': configs.get_b16_config(),

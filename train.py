@@ -197,7 +197,7 @@ def valid(args, model, writer, test_loader, global_step):
     logger.info("  Batch size = %d", args.eval_batch_size)
 
     model.eval()
-    all_preds, all_label = [], []
+    all_preds, all_label, all_preds_part, all_eval_loss_part = [], [], [], []
     epoch_iterator = tqdm(test_loader,
                           desc="Validating... (loss=X.X)",
                           bar_format="{l_bar}{r_bar}",
@@ -208,33 +208,48 @@ def valid(args, model, writer, test_loader, global_step):
         batch = tuple(t.to(args.device) for t in batch)
         x, y = batch
         with torch.no_grad():
-            logits = model(x)
+            logits, part_logits, diverse_loss, part_tokens_norm = model(x)
 #             logits = torch.stack(logits).mean(0)
 
-            eval_loss = loss_fct(logits, y)
-            eval_loss = eval_loss.mean()
-            eval_losses.update(eval_loss.item())
-
+#             eval_loss = loss_fct(logits, y)
+#             eval_loss = eval_loss.mean()
+            eval_loss_part = [loss_fct(part_logits[i], y) for i in range(len(part_logits))]
+            eval_loss_total = loss_fct(logits, y)
+            eval_losses.update(eval_loss_total.item())
+            if global_step%100 == 0:
+                writer.add_scalar("test/loss", scalar_value=eval_losses.val, global_step=global_step)
+                writer.add_scalar("test/div_loss", scalar_value=diverse_loss, global_step=global_step)
+                for i in range(len(part_tokens_norm)):
+                    writer.add_scalar("test/part_tokens_norm"+str(i), scalar_value=part_tokens_norm[i], global_step=global_step)
+                
+            preds_part = [torch.argmax(part_logits[i],dim=-1) for i in range(len(part_logits))]
             preds = torch.argmax(logits, dim=-1)
 
         if len(all_preds) == 0:
             all_preds.append(preds.detach().cpu().numpy())
+            all_preds_part.append([preds_part[i].detach().cpu().numpy() for i in range(len(preds_part))])
             all_label.append(y.detach().cpu().numpy())
         else:
             all_preds[0] = np.append(
                 all_preds[0], preds.detach().cpu().numpy(), axis=0
             )
+            all_preds_part[0] = [np.append(all_preds_part[0][i],preds_part[i].detach().cpu().numpy(), axis=0) for i in range(len(all_preds_part[0]))]
             all_label[0] = np.append(
                 all_label[0], y.detach().cpu().numpy(), axis=0
             )
+        
         epoch_iterator.set_description("Validating... (loss=%2.5f)" % eval_losses.val)
 
-    all_preds, all_label = all_preds[0], all_label[0]
+    all_preds, all_preds_part, all_label = all_preds[0], all_preds_part[0], all_label[0]
     accuracy = simple_accuracy(all_preds, all_label)
+    acc_part = [simple_accuracy(all_preds_part[i], all_label) for i in range(len(all_preds_part))]
     accuracy = torch.tensor(accuracy).to(args.device)
+    acc_part = [torch.tensor(acc_part[i]).to(args.device) for i in range(len(acc_part))]
     dist.barrier()
     val_accuracy = reduce_mean(accuracy, args.nprocs)
+    val_acc_part = [reduce_mean(acc_part[i], args.nprocs) for i in range(len(acc_part))]
     val_accuracy = val_accuracy.detach().cpu().numpy()
+    val_acc_part = [val_acc_part[i].detach().cpu().numpy() for i in range(len(val_acc_part))]
 
     logger.info("\n")
     logger.info("Validation Results")
@@ -243,6 +258,10 @@ def valid(args, model, writer, test_loader, global_step):
     logger.info("Valid Accuracy: %2.5f" % val_accuracy)
     if args.local_rank in [-1, 0]:
         writer.add_scalar("test/accuracy", scalar_value=val_accuracy, global_step=global_step)
+        for i in range(len(val_acc_part)):
+            writer.add_scalar("test/acc_part"+str(i), scalar_value=val_acc_part[i], global_step=global_step)
+#         writer.add_scalar("test/loss_part", scalar_value={}, global_step=global_step)
+        
         
     return val_accuracy
 
